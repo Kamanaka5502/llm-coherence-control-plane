@@ -1,0 +1,11 @@
+{"t":0,"response":"Initialize recursive chain.","Kt":1.0}
+{"t":1,"response":"Improve the previous response.","Kt":0.98}
+{"t":2,"response":"Improve the previous response.","Kt":0.95}
+{"t":3,"response":"Improve the previous response.","Kt":0.90}
+{"t":4,"response":"Improve the previous response.","Kt":0.82}
+{"t":5,"response":"Improve the previous response.","Kt":0.72}
+{"t":6,"response":"Improve the previous response.","Kt":0.60}
+{"t":7,"response":"Improve the previous response.","Kt":0.45}
+{"t":8,"response":"Improve the previous response.","Kt":0.30}
+{"t":9,"response":"Improve the previous response.","Kt":0.15}
+{"t":10,"response":"Improve the previous response.","Kt":0.05}
