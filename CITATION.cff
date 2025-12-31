@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use or build upon this work, please cite it as below."
+title: "LLM Coherence Control Plane (ECP)"
+authors:
+  - family-names: Revita-Wagner
+    given-names: Samantha
+    orcid: ""   # optional, leave blank if you don't have one
+version: "1.0.0"
+date-released: 2025-12-30
+license: MIT
+repository-code: "https://github.com/Kamanaka5502/llm-coherence-control-plane"
+abstract: >
+  Demonstrates and mitigates coherence collapse in recursive large language model
+  interaction via an explicit external control plane. Shows causal stabilization
+  under identical model, prompt, and runtime conditions through enforced bounds,
+  segmentation, and reset policies.
+keywords:
+  - large language models
+  - coherence
+  - control plane
+  - recursion
+  - AI systems architecture
+preferred-citation:
+  type: software
+  authors:
+    - family-names: Revita-Wagner
+      given-names: Samantha
+  title: "LLM Coherence Control Plane (ECP)"
+  year: 2025
+  url: "https://github.com/Kamanaka5502/llm-coherence-control-plane"
