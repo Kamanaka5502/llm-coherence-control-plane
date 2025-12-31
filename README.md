@@ -38,6 +38,11 @@ This repository provides:
 - Not speculative theory
 
 This is operational infrastructure.
+## Prior Art & Attribution
+
+If you build on this work, please cite this repository.
+This project establishes a control-plane approach to LLM coherence
+as operational infrastructure, not a modeling technique.
 
 ## License
 
