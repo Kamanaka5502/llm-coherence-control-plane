@@ -22,7 +22,6 @@ Same runtime.
 
 **Only difference:**  
 The system enforces bounds.
-
 ## What This Repo Is
 
 This repository provides:
@@ -43,3 +42,8 @@ This is operational infrastructure.
 ## License
 
 MIT — open core.
+## Citation
+
+If you use or build upon this work, please cite the repository.
+See `CITATION.cff` for the preferred citation format.
+
