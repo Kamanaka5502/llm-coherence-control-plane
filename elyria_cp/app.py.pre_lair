@@ -1,0 +1,383 @@
+import typer
+app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+"""
+elyria_cp/app.py
+
+A complete, clean Typer CLI for Elyria Control Plane that:
+- records nodes (`new`)
+- shows last node (`last`)
+- prints node stats with raw + filtered themes (`stats`)
+- lists nodes (`list`)
+- clears store safely (`clear`)
+
+Storage:
+- Uses JSONL by default (one JSON object per line)
+- Will also read legacy JSON array files if present
+- Path is configurable via env var: ELYRIA_CP_NODESTORE
+"""
+
+
+import json
+import os
+import re
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import typer
+
+app = typer.Typer(add_completion=False)
+
+# ----------------------------
+# Storage
+# ----------------------------
+
+def _default_store_path() -> Path:
+    """
+    Determine a sensible default nodes store location.
+
+    Priority:
+    1) ELYRIA_CP_NODESTORE env var (file path)
+    2) ./elyria_cp/nodes.jsonl (next to this file)
+    3) ./nodes.jsonl (cwd)
+    """
+    env = os.getenv("ELYRIA_CP_NODESTORE")
+    if env:
+        return Path(env).expanduser().resolve()
+
+    here = Path(__file__).resolve().parent
+    candidate = here / "nodes.jsonl"
+    if candidate.exists():
+        return candidate
+
+    cwd_candidate = Path.cwd() / "nodes.jsonl"
+    return cwd_candidate
+
+
+NODES_PATH: Path = _default_store_path()
+
+
+def _ensure_parent_dir(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_nodes(path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """
+    Load nodes from JSONL (preferred) or JSON (legacy).
+    Returns a list of dict nodes.
+    """
+    p = (path or NODES_PATH).expanduser().resolve()
+    if not p.exists():
+        return []
+
+    # Try JSONL first
+    nodes: List[Dict[str, Any]] = []
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            first = f.read(1)
+            if not first:
+                return []
+            f.seek(0)
+
+            # If file starts with '[', treat as JSON array
+            if first.strip().startswith("["):
+                data = json.load(f)
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            nodes.append(item)
+                        else:
+                            nodes.append({"text": str(item), "ts": _now_iso()})
+                return nodes
+
+            # Otherwise parse as JSONL
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        nodes.append(obj)
+                    else:
+                        nodes.append({"text": str(obj), "ts": _now_iso()})
+                except json.JSONDecodeError:
+                    # Keep a breadcrumb rather than dying
+                    nodes.append({"text": line, "ts": _now_iso(), "parse_error": True})
+        return nodes
+    except Exception:
+        # If anything goes weird, fail soft rather than crash your CLI
+        return []
+
+
+def append_node(node: Dict[str, Any], path: Optional[Path] = None) -> None:
+    """
+    Append a node as JSONL to the nodes store.
+    """
+    p = (path or NODES_PATH).expanduser().resolve()
+    _ensure_parent_dir(p)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(node, ensure_ascii=False) + "\n")
+
+
+def write_nodes(nodes: List[Dict[str, Any]], path: Optional[Path] = None) -> None:
+    """
+    Rewrite the store as JSONL (canonical).
+    """
+    p = (path or NODES_PATH).expanduser().resolve()
+    _ensure_parent_dir(p)
+    with p.open("w", encoding="utf-8") as f:
+        for n in nodes:
+            if not isinstance(n, dict):
+                n = {"text": str(n), "ts": _now_iso()}
+            f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
+
+# ----------------------------
+# Theme extraction
+# ----------------------------
+
+STOP_BASE = {
+    "a","an","the","and","or","but","if","then","so","to","of","in","on","for","with",
+    "is","are","was","were","be","been","being","this","that","these","those","it","its",
+    "i","you","we","they","he","she","them","us","my","your","our","their","as","at","by"
+}
+
+def _tokenize(text: str, *, extra_stop=None, min_len: int = 3) -> List[str]:
+    """
+    Tokenize into meaningful-ish tokens.
+    - removes stopwords
+    - removes digit-only tokens
+    - removes long alphabet-run test strings (full or partial)
+    """
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
+    cleaned: List[str] = []
+
+    for w in words:
+        if len(w) < min_len:
+            continue
+        if w in STOP_BASE:
+            continue
+        if extra_stop and w in extra_stop:
+            continue
+        if w.isdigit():
+            continue
+
+        # Drop long alphabet runs like abcdefghijklmnopqr...
+        if w.isalpha() and len(w) >= 10:
+            # if letters are mostly unique, it’s probably a sequence string
+            if len(set(w)) / len(w) > 0.8:
+                continue
+
+        cleaned.append(w)
+
+    return cleaned
+
+
+def _bigrams(words: List[str]) -> List[str]:
+    """
+    Build adjacent word pairs, skipping duplicates like 'elyria elyria'.
+    """
+    out: List[str] = []
+    for i in range(len(words) - 1):
+        a, b = words[i], words[i + 1]
+        if a == b:
+            continue
+        out.append(f"{a} {b}")
+    return out
+
+
+def _top_themes(
+    texts: List[str],
+    *,
+    n: int = 50,
+    extra_stop=None,
+    min_len: int = 3,
+    presence: bool = True
+):
+    """
+    presence=True counts per-node presence (prevents one node spamming a token 500x)
+    presence=False counts raw frequency across all text
+    """
+    uni = Counter()
+    bi = Counter()
+
+    for t in texts:
+        w = _tokenize(t, extra_stop=extra_stop, min_len=min_len)
+        b = _bigrams(w)
+
+        if presence:
+            uni.update(set(w))
+            bi.update(set(b))
+        else:
+            uni.update(w)
+            bi.update(b)
+
+    return uni.most_common(n), bi.most_common(n)
+
+
+# ----------------------------
+# CLI Commands
+# ----------------------------
+
+def _node_text(n: Any) -> str:
+    if isinstance(n, str):
+        return n
+    if isinstance(n, dict):
+        t = (
+            n.get("text")
+            or n.get("content")
+            or n.get("message")
+            or n.get("prompt")
+            or n.get("raw")
+            or ""
+        )
+        return t if isinstance(t, str) else str(t)
+    return str(n)
+
+
+@app.command()
+def new(
+    text: Optional[str] = typer.Argument(None, help="Text for the new node. If omitted, prompts interactively."),
+):
+    """
+    Record a new node (interactive by default).
+    """
+    if text is None:
+        try:
+            text = input("→: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            typer.echo("\n(cancelled)")
+            raise typer.Exit(code=1)
+
+    if not text:
+        typer.echo("no text provided")
+        raise typer.Exit(code=1)
+
+    node = {
+        "ts": _now_iso(),
+        "text": text,
+    }
+    append_node(node)
+    typer.echo("✓ node recorded")
+
+
+@app.command()
+def last():
+    """
+    Print the last recorded node text.
+    """
+    nodes = load_nodes()
+    if not nodes:
+        typer.echo("no nodes recorded")
+        raise typer.Exit(code=0)
+
+    typer.echo(_node_text(nodes[-1]))
+
+
+@app.command()
+def list(limit: int = typer.Option(10, "--limit", "-n", help="How many nodes to show.")):
+    """
+    List the most recent nodes (timestamp + text preview).
+    """
+    nodes = load_nodes()
+    if not nodes:
+        typer.echo("no nodes recorded")
+        return
+
+    show = nodes[-limit:] if limit > 0 else nodes
+    for n in show:
+        ts = n.get("ts", "")
+        t = _node_text(n).replace("\n", " ").strip()
+        if len(t) > 120:
+            t = t[:117] + "..."
+        typer.echo(f"{ts}  {t}")
+
+
+@app.command()
+def clear(
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt.")
+):
+    """
+    Clear the node store (destructive).
+    """
+    if not yes:
+        confirm = typer.confirm(f"Delete all nodes in {NODES_PATH}?")
+        if not confirm:
+            typer.echo("cancelled")
+            return
+    write_nodes([])
+    typer.echo("cleared")
+
+
+@app.command()
+def stats(
+    top: int = typer.Option(5, "--top", help="How many results to display."),
+    hide_top: int = typer.Option(5, "--hide-top", help="Dynamically hide N most common raw tokens for filtered view."),
+    min_len: int = typer.Option(3, "--min-len", help="Minimum token length for filtered view."),
+    presence: bool = typer.Option(True, "--presence/--frequency", help="Count per-node presence vs raw frequency."),
+):
+    """
+    Show node statistics (raw + filtered).
+
+    Raw view: lightweight tokenization (shows what is actually in the corpus).
+    Filtered view: uses tokenizer + dynamic stop (hides obvious common tokens like identity/greeting loops).
+    """
+    nodes = load_nodes()
+    texts: List[str] = []
+    for n in nodes:
+        t = _node_text(n)
+        if isinstance(t, str) and t.strip():
+            texts.append(t)
+
+    typer.echo(f"total nodes: {len(nodes)}")
+
+    if not texts:
+        typer.echo("top raw words:")
+        typer.echo("top words:")
+        typer.echo("top phrases:")
+        return
+
+    # Raw tokens (lightweight) for sanity check
+    raw = Counter()
+    for t in texts:
+        raw.update(re.findall(r"[a-z0-9']+", t.lower()))
+
+    typer.echo("top raw words:")
+    for w, c in raw.most_common(top):
+        typer.echo(f"  {w}: {c}")
+
+    # Dynamically hide the most common raw tokens (usually identity/greeting loops)
+    dynamic_stop = {w for w, _ in raw.most_common(hide_top)} if hide_top > 0 else set()
+
+    # Filtered themes
+    top_words, top_bigrams = _top_themes(
+        texts,
+        n=max(50, top * 10),
+        extra_stop=dynamic_stop,
+        min_len=min_len,
+        presence=presence,
+    )
+
+    typer.echo("top words:")
+    for w, c in top_words[:top]:
+        typer.echo(f"  {w}: {c}")
+
+    typer.echo("top phrases:")
+    for p, c in top_bigrams[:top]:
+        typer.echo(f"  {p}: {c}")
+
+
+def main():
+    app()
+
+
+if __name__ == "__main__":
+    main()

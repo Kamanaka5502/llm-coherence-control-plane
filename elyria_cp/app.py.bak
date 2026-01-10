@@ -1,0 +1,130 @@
+import typer
+from instrumentation import record
+from pathlib import Path
+from datetime import datetime, timezone
+import json
+from collections import Counter
+
+from intelligence_gate import IntelligenceGate
+
+app = typer.Typer()
+
+# Persistent storage
+DB = Path.home() / ".elyria_nodes.json"
+
+# Intelligence layer (governance)
+gate = IntelligenceGate()
+
+
+# ---------- Storage helpers ----------
+
+def load_nodes():
+    if not DB.exists():
+        return []
+    try:
+        return json.loads(DB.read_text())
+    except Exception:
+        return []
+
+
+def save_nodes(nodes):
+    DB.write_text(json.dumps(nodes, indent=2))
+
+
+# ---------- Commands ----------
+
+@app.command()
+def new():
+    """
+    Record a new node.
+    """
+    text = input("→: ").strip()
+
+    gate_snapshot, dampening = gate.process(text)
+    print("[INTELLIGENCE GATE]", gate_snapshot, "dampening:", dampening)
+    record(gate_snapshot, dampening)
+    if dampening < 1.0:
+        text = text[:int(len(text) * dampening)]
+
+    if not text:
+        typer.echo("empty input ignored")
+        return
+
+    nodes = load_nodes()
+    node = {
+        "text": text,
+        "ts": datetime.now(timezone.utc).isoformat()
+    }
+    nodes.append(node)
+    save_nodes(nodes)
+
+    typer.echo("✓ node recorded")
+
+
+@app.command()
+def last():
+    """
+    Show the most recent node.
+    """
+    nodes = load_nodes()
+    if not nodes:
+        typer.echo("no nodes recorded")
+        return
+
+    typer.echo(nodes[-1]["text"])
+
+
+@app.command()
+def stats():
+    """
+    Show node statistics.
+    """
+    nodes = load_nodes()
+    texts = [n["text"] for n in nodes]
+
+    counter = Counter()
+    for t in texts:
+        counter.update(t.lower().split())
+
+    typer.echo(f"total nodes: {len(nodes)}")
+    typer.echo("top themes:")
+    for word, count in counter.most_common(5):
+        typer.echo(f"  {word}: {count}")
+
+import re
+from collections import Counter
+
+STOP = {
+    "a","an","the","and","or","but","if","then","so","to","of","in","on","for","with",
+    "is","are","was","were","be","been","being","this","that","these","those","it","its",
+    "i","you","we","they","he","she","them","us","my","your","our","their","as","at","by"
+}
+
+def _tokenize(text: str):
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
+    return [w for w in words if w not in STOP and len(w) > 1]
+
+def _bigrams(words):
+    return [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
+
+def _top_themes(texts, n=15):
+    uni = Counter()
+    bi = Counter()
+    for t in texts:
+        w = _tokenize(t)
+        uni.update(w)
+        bi.update(_bigrams(w))
+    return uni.most_common(n), bi.most_common(n)
+
+
+print("top words:")
+for k, v in top_words:
+    print(f"  {k}: {v}")
+
+print("top phrases:")
+for k, v in top_bigrams:
+    print(f"  {k}: {v}")
+
+
+if __name__ == "__main__":
+    app()
